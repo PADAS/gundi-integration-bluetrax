@@ -5,14 +5,14 @@ from .core import AuthActionConfiguration, PullActionConfiguration, PushActionCo
 
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
     username: str = pydantic.Field(..., title = "Username", description = "Username for Bluetrax account")
-    password: pydantic.SecretStr = pydantic.Field(..., title = "Password", 
-                                description = "Password for Bluetrax account",
+    apikey: pydantic.SecretStr = pydantic.Field(..., title = "Bluetrax API Key", 
+                                description = "A special API key that is required for accessing the Bluetrax API.",
                                 format="password")
 
     ui_global_options: GlobalUISchemaOptions = GlobalUISchemaOptions(
         order=[
             "username",
-            "password",
+            "apikey",
         ],
     )
 

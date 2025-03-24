@@ -11,7 +11,9 @@ from gundi_core.schemas.v2 import Integration
 from pydantic import BaseModel, parse_obj_as
 from typing import List, Optional, Iterable, Generator, Any
 
-from app.bluetrax import authenticate, get_assets, get_asset_history, HistoryItem
+from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
+    get_vehicle_history, CurrentLocation, HistoryItem
+
 
 logger = logging.getLogger(__name__)
 state_manager = IntegrationStateManager()
@@ -29,67 +31,73 @@ def get_auth_config(integration):
             f"are missing. Please fix the integration setup in the portal."
         )
     return AuthenticateConfig.parse_obj(auth_config.data)
+
+
 async def action_auth(integration:Integration, action_config: AuthenticateConfig):
     logger.info(f"Executing auth action with integration {integration} and action_config {action_config}...")
 
-    base_url = integration.base_url
-
     try:
-        auth = await authenticate(action_config.username, action_config.password.get_secret_value())
-        if auth and auth.users:
-            
-            return {"valid_credentials": True,
-                    "user_id": auth.users[0].user_id,
-                    "client_id": auth.users[0].client_id,
-                    "contact_id": auth.users[0].contact_id,
-                    "client_name": auth.users[0].client_name
-                    }
+        await authenticate(username=action_config.username, 
+                           apikey=action_config.apikey.get_secret_value())
     except httpx.HTTPStatusError as e:
         return {"valid_credentials": False, "status_code": e.response.status_code}
 
 
 @activity_logger()
-async def action_pull_observations(integration:Integration, action_config: PullEventsConfig):
+async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")
 
     auth_config = get_auth_config(integration)
-    auth = await authenticate(auth_config.username, auth_config.password.get_secret_value())
+    auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
 
-    assets = await get_assets(auth.users[0].user_id)
+    currentLocations = await get_fleet_current_locations(token=auth.token)
 
-    asset_state = {}
+    observations = [transform_current_location(item) for item in currentLocations.data]
 
-    for asset in assets.userAssets:
+    await send_observations_to_gundi(list(observations), integration_id=integration.id)
+    
+    accumulator = []
+    for item in currentLocations.data:
+        historyLocations = await get_vehicle_history(
+            token=auth.token,
+            reg_no=item.reg_no,
+            start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
+            end_date=datetime.now(tz=timezone.utc)
+        )
 
-        last_state = await  state_manager.get_state(integration_id=integration.id, action_id="pull_observations", source_id=asset.unit_id)
-        start_time = datetime.fromisoformat(last_state["latest_fixtime"]) if last_state else datetime.now(tz=timezone.utc) - timedelta(hours=2)
-        asset_history = await get_observations(user_id=auth.users[0].user_id, unit_id=asset.unit_id, start_time=start_time, end_time=datetime.now(tz=timezone.utc))
+        accumulator.extend([transform_history_item(item) for item in historyLocations.data])
 
-        if asset_history:
+    await send_observations_to_gundi(accumulator, integration_id=integration.id)
 
-            for batch in batches(asset_history.data, 100):
-                await send_observations_to_gundi(observations=[transform(item)for item in batch],
-                                                  integration_id=integration.id)
-
-            if getattr(asset_history, 'data', None):                
-                asset_state[asset.unit_id] = max(item.fixtime for item in asset_history.data)       
-
-    for unit_id, item in asset_state.items():
-        await state_manager.set_state(integration_id=integration.id, action_id="pull_observations", state={"latest_fixtime": item.isoformat()}, source_id=unit_id)
-    return {'assets': assets.userAssets}
+    return {'finished': True}
 
 
-def batches(source: List, batch_size: int) -> Generator[List[Any], None, None]:
-    """
-    Yields batches of a given size from a source iterable.
-    """
-    for i in range(0, len(source), batch_size):
-        yield source[i:i + batch_size]
-
-
-def transform(item: HistoryItem):
+def transform_current_location(item: CurrentLocation):
     return {
-        "name": item.reg_no,
+        "source_name": item.reg_no,
+        "source": item.unit_id,
+        "type": "tracking-device",
+        "subject_type": "vehicle",
+        "recorded_at": item.fixtime,
+        "location": {
+            "lat": item.latitude,
+            "lon": item.longitude
+        },
+        "additional": {
+            "speed_kmph": item.speed,
+            "location": item.location,
+            "course": item.course,
+            "device_timezone": item.device_timezone,
+            "unit_id": item.unit_id,
+            "subject_name": item.reg_no,
+            "_from": "current_location"
+        }
+    }
+
+
+def transform_history_item(item: HistoryItem):
+    return {
+        "source_name": item.reg_no,
         "source": item.unit_id,
         "type": "tracking-device",
         "subject_type": "vehicle",
@@ -105,13 +113,9 @@ def transform(item: HistoryItem):
             "course": item.course,
             "device_timezone": item.device_timezone,
             "unit_id": item.unit_id,
-            "subject_name": item.reg_no
+            "subject_name": item.reg_no,
+            "_from": "history_item"
         }
     }
 
-async def get_observations(user_id: str, unit_id: str, start_time: datetime, end_time: datetime):
 
-    end_time = end_time or datetime.now(tz=timezone.utc)
-    history_result = await get_asset_history(unit_id, start_time, end_time)
-
-    return history_result
