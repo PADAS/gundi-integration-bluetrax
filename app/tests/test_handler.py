@@ -2,9 +2,6 @@ from datetime import datetime, timezone
 import httpx
 import pytest
 from unittest.mock import AsyncMock
-from app.actions.handlers import (
-    get_observations,
-)
 
 # @pytest.mark.asyncio
 # async def test_get_observations(mocker, a_good_history_result):
