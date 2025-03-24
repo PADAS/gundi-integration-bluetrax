@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from app.actions.configurations import AuthenticateConfig, PullEventsConfig
 from app.services.activity_logger import activity_logger
+from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_observations_to_gundi
 from app.services.state import IntegrationStateManager
 from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
@@ -39,10 +40,12 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
     try:
         await authenticate(username=action_config.username, 
                            apikey=action_config.apikey.get_secret_value())
+        return {"valid_credentials": True}
     except httpx.HTTPStatusError as e:
         return {"valid_credentials": False, "status_code": e.response.status_code}
 
 
+@crontab_schedule("*/10 * * * *")
 @activity_logger()
 async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")

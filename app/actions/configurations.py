@@ -1,6 +1,6 @@
 import pydantic
-from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions, UIOptions
-from .core import AuthActionConfiguration, PullActionConfiguration, PushActionConfiguration, ExecutableActionMixin
+from app.services.utils import FieldWithUIOptions, GlobalUISchemaOptions
+from .core import AuthActionConfiguration, PullActionConfiguration, ExecutableActionMixin
 
 
 class AuthenticateConfig(AuthActionConfiguration, ExecutableActionMixin):
