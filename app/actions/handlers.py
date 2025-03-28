@@ -39,11 +39,9 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
 
     try:
         # Ignore cached credentials, because this action is meant for validating configuration.
-        auth = await authenticate(username=action_config.username, 
-                           apikey=action_config.apikey.get_secret_value())
-
+        auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value())
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
-        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex.total_seconds())
+        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
         return {"valid_credentials": True}
 
@@ -65,7 +63,7 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         auth_config = get_auth_config(integration)
         auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
-        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex.total_seconds())
+        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
     currentLocations = await get_fleet_current_locations(token=auth.token)
 
