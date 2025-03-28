@@ -11,6 +11,7 @@ from app.services.utils import find_config_for_action
 from gundi_core.schemas.v2 import Integration
 from pydantic import BaseModel, parse_obj_as
 from typing import List, Optional, Iterable, Generator, Any
+from aiolimiter import AsyncLimiter
 
 from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
     get_vehicle_history, CurrentLocation, HistoryItem, LoginResponse
@@ -34,12 +35,15 @@ def get_auth_config(integration):
     return AuthenticateConfig.parse_obj(auth_config.data)
 
 
-async def action_auth(integration:Integration, action_config: AuthenticateConfig):
+async def action_auth(integration:Integration, action_config: AuthenticateConfig, rate_limiter:AsyncLimiter=None) -> dict:
     logger.info(f"Executing auth action with integration {integration} and action_config {action_config}...")
+
+    rate_limiter = rate_limiter or AsyncLimiter(max_rate=1, time_period=10)
 
     try:
         # Ignore cached credentials, because this action is meant for validating configuration.
-        auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value())
+        auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value(),
+                                  rate_limiter=rate_limiter)
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
         await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
@@ -54,6 +58,8 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
 async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")
 
+    rate_limiter = AsyncLimiter(max_rate=1, time_period=10)
+    
     if paused := await state_manager.get_state(
         integration_id=integration.id,
         action_id='pull_observations_quiet'
@@ -68,12 +74,13 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         auth = LoginResponse.parse_obj(saved_loginresponse)
     else:
         auth_config = get_auth_config(integration)
-        auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
+        auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value(),
+                                  rate_limiter=rate_limiter)
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
         await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
     try:
-        currentLocations = await get_fleet_current_locations(token=auth.token)
+        currentLocations = await get_fleet_current_locations(token=auth.token, rate_limiter=rate_limiter)
 
         observations = [transform_current_location(item) for item in currentLocations.data]
 
@@ -85,7 +92,8 @@ async def action_pull_observations(integration:Integration, action_config: PullE
                 token=auth.token,
                 reg_no=item.reg_no,
                 start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
-                end_date=datetime.now(tz=timezone.utc)
+                end_date=datetime.now(tz=timezone.utc),
+                rate_limiter=rate_limiter
             )
 
             accumulator.extend([transform_history_item(item) for item in historyLocations.data])
