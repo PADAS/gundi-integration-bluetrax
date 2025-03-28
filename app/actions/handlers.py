@@ -13,7 +13,7 @@ from pydantic import BaseModel, parse_obj_as
 from typing import List, Optional, Iterable, Generator, Any
 
 from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
-    get_vehicle_history, CurrentLocation, HistoryItem
+    get_vehicle_history, CurrentLocation, HistoryItem, LoginResponse
 
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,15 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
     logger.info(f"Executing auth action with integration {integration} and action_config {action_config}...")
 
     try:
-        await authenticate(username=action_config.username, 
+        # Ignore cached credentials, because this action is meant for validating configuration.
+        auth = await authenticate(username=action_config.username, 
                            apikey=action_config.apikey.get_secret_value())
+
+        ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
+        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex.total_seconds())
+
         return {"valid_credentials": True}
+
     except httpx.HTTPStatusError as e:
         return {"valid_credentials": False, "status_code": e.response.status_code}
 
@@ -50,8 +56,16 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
 async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")
 
-    auth_config = get_auth_config(integration)
-    auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
+    if saved_loginresponse := await state_manager.get_state(
+        integration_id=integration.id,
+        action_id='auth'
+    ):
+        auth = LoginResponse.parse_obj(saved_loginresponse)
+    else:
+        auth_config = get_auth_config(integration)
+        auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
+        ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
+        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex.total_seconds())
 
     currentLocations = await get_fleet_current_locations(token=auth.token)
 
@@ -69,8 +83,8 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         )
 
         accumulator.extend([transform_history_item(item) for item in historyLocations.data])
-
-    await send_observations_to_gundi(accumulator, integration_id=integration.id)
+    if accumulator:
+        await send_observations_to_gundi(accumulator, integration_id=integration.id)
 
     return {'finished': True}
 

@@ -61,7 +61,7 @@ class VehicleHistoryResponse(pydantic.BaseModel):
     data: list[HistoryItem] = pydantic.Field(default_factory=list)
 
 
-async def authenticate(*, username: str, apikey: str):
+async def authenticate(*, username: str, apikey: str) -> LoginResponse:
     
     url = f'{BLUETRAX_API_URL}/Login/Login'
     headers = {
@@ -88,7 +88,7 @@ async def authenticate(*, username: str, apikey: str):
         return LoginResponse.parse_obj(response.json())
 
 
-async def get_fleet_current_locations(token:str):
+async def get_fleet_current_locations(token:str) -> FleetCurrentLocations:
     url = f'{BLUETRAX_API_URL}/Public/fleet_current_locations'
     
     async with httpx.AsyncClient(verify=False) as client:
@@ -102,7 +102,7 @@ async def get_fleet_current_locations(token:str):
         return FleetCurrentLocations.parse_obj(response.json())
 
 
-async def get_vehicle_history(token:str, reg_no:str, start_date:datetime, end_date:datetime):
+async def get_vehicle_history(token:str, reg_no:str, start_date:datetime, end_date:datetime) -> VehicleHistoryResponse:
     url = f'{BLUETRAX_API_URL}/Public/get_vehicle_history'
     
     start_at = start_date.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
