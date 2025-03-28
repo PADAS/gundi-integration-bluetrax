@@ -54,6 +54,13 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
 async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")
 
+    if paused := await state_manager.get_state(
+        integration_id=integration.id,
+        action_id='pull_observations_quiet'
+    ):
+        logger.info(f"Pull observations action is paused: {paused}")
+        return paused
+    
     if saved_loginresponse := await state_manager.get_state(
         integration_id=integration.id,
         action_id='auth'
@@ -65,27 +72,34 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
         await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
-    currentLocations = await get_fleet_current_locations(token=auth.token)
+    try:
+        currentLocations = await get_fleet_current_locations(token=auth.token)
 
-    observations = [transform_current_location(item) for item in currentLocations.data]
+        observations = [transform_current_location(item) for item in currentLocations.data]
 
-    await send_observations_to_gundi(list(observations), integration_id=integration.id)
+        await send_observations_to_gundi(list(observations), integration_id=integration.id)
+        
+        accumulator = []
+        for item in currentLocations.data:
+            historyLocations = await get_vehicle_history(
+                token=auth.token,
+                reg_no=item.reg_no,
+                start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
+                end_date=datetime.now(tz=timezone.utc)
+            )
+
+            accumulator.extend([transform_history_item(item) for item in historyLocations.data])
+        if accumulator:
+            await send_observations_to_gundi(accumulator, integration_id=integration.id)
+
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
+            logger.warning(f'Request was forbidden, pausing requests for 1 hour. Reason is: {e.response.text}')
+            await state_manager.set_state(integration_id=integration.id, action_id='pull_observations_quiet', 
+                                          state={'paused': True, 'reason': e.response.text}, ex=60*60)
+        raise e
     
-    accumulator = []
-    for item in currentLocations.data:
-        historyLocations = await get_vehicle_history(
-            token=auth.token,
-            reg_no=item.reg_no,
-            start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
-            end_date=datetime.now(tz=timezone.utc)
-        )
-
-        accumulator.extend([transform_history_item(item) for item in historyLocations.data])
-    if accumulator:
-        await send_observations_to_gundi(accumulator, integration_id=integration.id)
-
     return {'finished': True}
-
 
 def transform_current_location(item: CurrentLocation):
     return {
