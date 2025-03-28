@@ -25,7 +25,8 @@ class IntegrationStateManager:
             with attempt:
                 await self.db_client.set(
                     f"integration_state.{integration_id}.{action_id}.{source_id}",
-                    json.dumps(state, default=str, **kwargs)
+                    json.dumps(state, default=str), 
+                    **kwargs
                 )
 
     async def delete_state(self, integration_id: str, action_id: str, source_id: str = "no-source"):
