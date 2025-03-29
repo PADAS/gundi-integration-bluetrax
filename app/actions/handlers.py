@@ -2,7 +2,7 @@ import httpx
 import logging
 from datetime import datetime, timezone, timedelta
 from app.actions.configurations import AuthenticateConfig, PullEventsConfig
-from app.services.activity_logger import activity_logger
+from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_observations_to_gundi
 from app.services.state import IntegrationStateManager
@@ -35,15 +35,12 @@ def get_auth_config(integration):
     return AuthenticateConfig.parse_obj(auth_config.data)
 
 
-async def action_auth(integration:Integration, action_config: AuthenticateConfig, rate_limiter:AsyncLimiter=None) -> dict:
+async def action_auth(integration:Integration, action_config: AuthenticateConfig) -> dict:
     logger.info(f"Executing auth action with integration {integration} and action_config {action_config}...")
-
-    rate_limiter = rate_limiter or AsyncLimiter(max_rate=1, time_period=10)
 
     try:
         # Ignore cached credentials, because this action is meant for validating configuration.
-        auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value(),
-                                  rate_limiter=rate_limiter)
+        auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value())
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
         await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
@@ -53,7 +50,7 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
         return {"valid_credentials": False, "status_code": e.response.status_code}
 
 
-@crontab_schedule("*/10 * * * *")
+@crontab_schedule("*/5 * * * *")
 @activity_logger()
 async def action_pull_observations(integration:Integration, action_config: PullEventsConfig) -> dict:
     logger.info(f"Executing pull_observations action with integration {integration} and action_config {action_config}...")
@@ -74,40 +71,55 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         auth = LoginResponse.parse_obj(saved_loginresponse)
     else:
         auth_config = get_auth_config(integration)
-        auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value(),
-                                  rate_limiter=rate_limiter)
+        async with rate_limiter:
+            auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
         ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
         await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
     try:
-        currentLocations = await get_fleet_current_locations(token=auth.token, rate_limiter=rate_limiter)
+        async with rate_limiter:
+            currentLocations = await get_fleet_current_locations(token=auth.token)
 
         observations = [transform_current_location(item) for item in currentLocations.data]
 
         await send_observations_to_gundi(list(observations), integration_id=integration.id)
         
-        accumulator = []
-        for item in currentLocations.data:
-            historyLocations = await get_vehicle_history(
-                token=auth.token,
-                reg_no=item.reg_no,
-                start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
-                end_date=datetime.now(tz=timezone.utc),
-                rate_limiter=rate_limiter
-            )
+        # accumulator = []
+        # for item in currentLocations.data:
+        #     async with rate_limiter:
+        #         historyLocations = await get_vehicle_history(
+        #             token=auth.token,
+        #             reg_no=item.reg_no,
+        #             start_date=datetime.now(tz=timezone.utc) - timedelta(minutes=10),
+        #             end_date=datetime.now(tz=timezone.utc)
+        #         )
 
-            accumulator.extend([transform_history_item(item) for item in historyLocations.data])
-        if accumulator:
-            await send_observations_to_gundi(accumulator, integration_id=integration.id)
+        #     accumulator.extend([transform_history_item(item) for item in historyLocations.data])
+        # if accumulator:
+        #     await send_observations_to_gundi(accumulator, integration_id=integration.id)
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
             logger.warning(f'Request was forbidden, pausing requests for 1 hour. Reason is: {e.response.text}')
+
+            await log_action_activity(
+                integration_id=integration.id,
+                action_id='pull_observations',
+                title="Pull observations action was paused",
+                level="WARNING",
+                data={
+                    "message": "Request was forbidden, pausing requests for 1 hour.",
+                    "status_code": e.response.status_code,
+                    "reason": e.response.text[:200]
+                }
+            )
+
             await state_manager.set_state(integration_id=integration.id, action_id='pull_observations_quiet', 
                                           state={'paused': True, 'reason': e.response.text}, ex=60*60)
         raise e
     
     return {'finished': True}
+
 
 def transform_current_location(item: CurrentLocation):
     return {
