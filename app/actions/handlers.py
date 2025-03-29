@@ -64,20 +64,22 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         logger.info(f"Pull observations action is paused: {paused}")
         return paused
     
+    auth = None
     if saved_loginresponse := await state_manager.get_state(
         integration_id=integration.id,
         action_id='auth'
     ):
         auth = LoginResponse.parse_obj(saved_loginresponse)
-    else:
-        auth_config = get_auth_config(integration)
-        async with rate_limiter:
-            auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
-        ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
-        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
 
     try:
         async with rate_limiter:
+
+            if not auth:
+                auth_config = get_auth_config(integration)
+                auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
+                ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
+                await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
+
             currentLocations = await get_fleet_current_locations(token=auth.token)
 
         observations = [transform_current_location(item) for item in currentLocations.data]
