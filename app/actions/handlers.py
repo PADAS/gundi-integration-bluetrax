@@ -12,6 +12,9 @@ from gundi_core.schemas.v2 import Integration
 from pydantic import BaseModel, parse_obj_as
 from typing import List, Optional, Iterable, Generator, Any
 from aiolimiter import AsyncLimiter
+from gundi_core.events import (
+    LogLevel,
+    IntegrationActionCustomLog)
 
 from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
     get_vehicle_history, CurrentLocation, HistoryItem, LoginResponse
@@ -108,7 +111,7 @@ async def action_pull_observations(integration:Integration, action_config: PullE
                 integration_id=integration.id,
                 action_id='pull_observations',
                 title="Pull observations action was paused",
-                level="WARNING",
+                level=LogLevel.WARNING,
                 data={
                     "message": "Request was forbidden, pausing requests for 1 hour.",
                     "status_code": e.response.status_code,
