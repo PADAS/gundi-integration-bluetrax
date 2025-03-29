@@ -8,6 +8,8 @@ aiohappyeyeballs==2.4.6
     # via aiohttp
 aiohttp==3.11.12
     # via gcloud-aio-auth
+aiolimiter==1.2.1
+    # via -r requirements.in
 aiosignal==1.3.2
     # via aiohttp
 anyio==3.7.1
