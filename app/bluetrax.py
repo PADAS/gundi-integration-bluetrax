@@ -55,7 +55,7 @@ async def authenticate(username: str, password: str):
 
     async with Client(
         transport=transport,
-        fetch_schema_from_transport=False,
+        fetch_schema_from_transport=True,
     ) as session:
 
         query = gql(
@@ -86,7 +86,7 @@ async def get_assets(user_id: str):
     user_id = int(user_id)
     async with Client(
         transport=transport,
-        fetch_schema_from_transport=False,
+        fetch_schema_from_transport=True,
     ) as session:
         query = gql(
             """
