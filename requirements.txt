@@ -10,6 +10,8 @@ aiohttp==3.14.3
     # via
     #   -r requirements-base.in
     #   gcloud-aio-auth
+aiolimiter==1.2.1
+    # via -r requirements.in
 aiosignal==1.4.0
     # via aiohttp
 anyio==3.7.1
