@@ -43,9 +43,8 @@ class IntegrationStateManager:
             return
         async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
-                await self.db_client.setex(
+                await self.db_client.set(
                     f"integration_state.{integration_id}.{action_id}.{source_id}",
-                    7*86400,
                     json.dumps(state, default=str)
                 )
 

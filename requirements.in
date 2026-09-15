@@ -1,2 +1,3 @@
 # Add your integration-specific dependencies here
 gql==3.5.0
+aiolimiter==1.2.1
