@@ -2,6 +2,7 @@ import json
 import logging
 import stamina
 import redis.asyncio as redis
+from typing import Optional
 from app import settings
 from .activity_logger import ephemeral_run
 from .retry_policies import REDIS_RETRY
@@ -38,14 +39,27 @@ class IntegrationStateManager:
         value = json.loads(json_value) if json_value else {}
         return value
 
-    async def set_state(self, integration_id: str, action_id: str, state: dict, source_id: str = "no-source"):
+    async def set_state(
+        self, integration_id: str, action_id: str, state: dict, source_id: str = "no-source",
+        *, ttl_seconds: Optional[int] = None
+    ):
+        """Write state, optionally expiring it after ttl_seconds.
+
+        Without a TTL the key persists, which is what most action state wants.
+        Connectors caching something with a lifetime of its own — a vendor
+        token, a back-off window — pass ttl_seconds so the key cannot outlive
+        what it describes. Redis rejects a non-positive expiry, so anything
+        that rounds to zero is floored at one second.
+        """
         if _skip_on_ephemeral_run("set_state", integration_id, action_id):
             return
+        expiry = {"ex": max(1, int(ttl_seconds))} if ttl_seconds is not None else {}
         async for attempt in stamina.retry_context(**REDIS_RETRY):
             with attempt:
                 await self.db_client.set(
                     f"integration_state.{integration_id}.{action_id}.{source_id}",
-                    json.dumps(state, default=str)
+                    json.dumps(state, default=str),
+                    **expiry
                 )
 
     async def set_if_absent(

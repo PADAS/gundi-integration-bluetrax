@@ -292,3 +292,43 @@ async def test_state_redis_retry_backoff_does_not_block_the_event_loop(mocker, m
 
     assert state == {}
     assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_set_integration_state_with_a_ttl(mocker, mock_redis, integration_v2):
+    mocker.patch("app.services.state.redis", mock_redis)
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration_v2.id)
+
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="auth",
+        state={"token": "a-vendor-token"},
+        ttl_seconds=3600,
+    )
+
+    mock_redis.Redis.return_value.set.assert_called_once_with(
+        f"integration_state.{integration_id}.auth.no-source",
+        '{"token": "a-vendor-token"}',
+        ex=3600,
+    )
+
+
+@pytest.mark.asyncio
+async def test_set_integration_state_floors_a_ttl_that_rounds_to_zero(
+    mocker, mock_redis, integration_v2
+):
+    # Redis rejects a non-positive expiry, so a token with seconds left on it
+    # must still be cached (briefly) rather than blowing up the action.
+    mocker.patch("app.services.state.redis", mock_redis)
+    state_manager = IntegrationStateManager()
+    integration_id = str(integration_v2.id)
+
+    await state_manager.set_state(
+        integration_id=integration_id,
+        action_id="auth",
+        state={"token": "an-expiring-token"},
+        ttl_seconds=-5,
+    )
+
+    assert mock_redis.Redis.return_value.set.call_args.kwargs["ex"] == 1
