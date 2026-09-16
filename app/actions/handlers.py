@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 state_manager = IntegrationStateManager()
 
 
+def auth_cache_ttl_seconds(auth: LoginResponse) -> int:
+    """How long a cached login response stays usable: the token's remaining
+    life, less a 15s margin so we never hand out a token that expires in
+    flight."""
+    remaining = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
+    return int(remaining.total_seconds())
+
+
 def get_auth_config(integration):
     # Look for the login credentials, needed for any action
     auth_config = find_config_for_action(
@@ -44,8 +52,8 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
     try:
         # Ignore cached credentials, because this action is meant for validating configuration.
         auth = await authenticate(username=action_config.username, apikey=action_config.apikey.get_secret_value())
-        ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
-        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
+        await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(),
+                                      ttl_seconds=auth_cache_ttl_seconds(auth))
 
         return {"valid_credentials": True}
 
@@ -80,8 +88,8 @@ async def action_pull_observations(integration:Integration, action_config: PullE
             if not auth:
                 auth_config = get_auth_config(integration)
                 auth = await authenticate(username=auth_config.username, apikey=auth_config.apikey.get_secret_value())
-                ex = auth.tokenxpiry - datetime.now(tz=timezone.utc) - timedelta(seconds=15)
-                await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(), ex=ex)
+                await state_manager.set_state(integration_id=integration.id, action_id='auth', state=auth.dict(),
+                                              ttl_seconds=auth_cache_ttl_seconds(auth))
 
             currentLocations = await get_fleet_current_locations(token=auth.token)
 
@@ -120,7 +128,7 @@ async def action_pull_observations(integration:Integration, action_config: PullE
             )
 
             await state_manager.set_state(integration_id=integration.id, action_id='pull_observations_quiet', 
-                                          state={'paused': True, 'reason': e.response.text}, ex=60*60)
+                                          state={'paused': True, 'reason': e.response.text}, ttl_seconds=60*60)
         raise e
     
     return {'finished': True}
