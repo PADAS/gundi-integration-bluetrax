@@ -136,3 +136,12 @@ dmypy.json
 .vscode
 
 sample-docs
+
+# Local credentials — the bare `.env` above does not match `.env.production`
+# or `local/.env.local.*`, so these sat untracked but stageable by `git add -A`.
+.env.*
+secrets.txt
+!*.example
+
+# Local scratch
+app/adhoc.py
