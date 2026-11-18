@@ -82,6 +82,46 @@ async def test_action_auth_caches_the_login_response_until_the_token_expires(
     assert 0 < ttl <= 24 * 60 * 60
 
 
+def _http_status_error(status_code):
+    request = httpx.Request("POST", "https://public-api.bluetrax.co.ke/api/Login/Login")
+    return httpx.HTTPStatusError(
+        f"{status_code}", request=request, response=httpx.Response(status_code, request=request)
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 401, 403])
+async def test_action_auth_reports_invalid_credentials_when_bluetrax_rejects_the_login(
+    mocker, state_manager_on_mock_redis, bluetrax_integration, auth_config, status_code
+):
+    mocker.patch.object(
+        handlers, "authenticate", mocker.AsyncMock(side_effect=_http_status_error(status_code))
+    )
+
+    result = await handlers.action_auth(bluetrax_integration, auth_config)
+
+    assert result == {"valid_credentials": False, "status_code": status_code}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        _http_status_error(404),
+        _http_status_error(503),
+        httpx.ConnectError("connection refused"),
+        httpx.ReadTimeout("timed out"),
+    ],
+)
+async def test_action_auth_raises_when_bluetrax_does_not_answer_the_login(
+    mocker, state_manager_on_mock_redis, bluetrax_integration, auth_config, error
+):
+    mocker.patch.object(handlers, "authenticate", mocker.AsyncMock(side_effect=error))
+
+    with pytest.raises(type(error)):
+        await handlers.action_auth(bluetrax_integration, auth_config)
+
+
 @pytest.mark.asyncio
 async def test_pull_observations_authenticates_and_caches_when_nothing_is_cached(
     mocker,

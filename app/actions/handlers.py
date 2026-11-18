@@ -21,6 +21,9 @@ from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
 
 
 logger = logging.getLogger(__name__)
+
+# Statuses Bluetrax uses when it rejects the login itself.
+REJECTED_LOGIN_STATUSES = (400, 401, 403)
 state_manager = IntegrationStateManager()
 
 
@@ -58,7 +61,13 @@ async def action_auth(integration:Integration, action_config: AuthenticateConfig
         return {"valid_credentials": True}
 
     except httpx.HTTPStatusError as e:
-        return {"valid_credentials": False, "status_code": e.response.status_code}
+        # Bluetrax answers a rejected username or API key with 400
+        # ("Invalid Credentials"). Any other status means Bluetrax didn't
+        # answer the sign-in properly, so it's reported as an error, the same
+        # as a timeout or a connection that never opened.
+        if e.response.status_code in REJECTED_LOGIN_STATUSES:
+            return {"valid_credentials": False, "status_code": e.response.status_code}
+        raise
 
 
 @crontab_schedule("*/5 * * * *")
