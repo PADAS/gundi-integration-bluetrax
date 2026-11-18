@@ -427,6 +427,12 @@ def test_redact_body_masks_secrets_in_a_json_body_at_any_depth():
     assert redact_body(body) == '{"username": "u", "password": "**********", "auth": {"api_key": "**********", "site": "s"}}'
 
 
+def test_redact_body_masks_a_bare_key_field_but_not_names_that_contain_key():
+    # Bluetrax's login body sends its API key as "key".
+    body = b'{"user_name": "u", "key": "abc123", "monkey": "m", "keyword": "k"}'
+    assert redact_body(body) == '{"user_name": "u", "key": "**********", "monkey": "m", "keyword": "k"}'
+
+
 def test_redact_body_masks_a_token_echoed_in_a_json_response():
     assert redact_body('{"access_token": "abc", "expires_in": 300}') == '{"access_token": "**********", "expires_in": 300}'
 

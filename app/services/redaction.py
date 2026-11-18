@@ -11,6 +11,9 @@ Two signals mark a value as secret, and either one is enough:
 - Its key name. Any key whose normalized form (lower case, ``-`` folded to
   ``_``) contains one of ``SENSITIVE_KEY_FRAGMENTS``. Deliberately broad:
   ``token_url`` is redacted too, and that over-redaction is the safe side.
+  A key named exactly one of ``SENSITIVE_KEY_NAMES`` counts as well: a bare
+  ``key`` is how some providers (Bluetrax's login body) name the credential,
+  and matching it as a fragment would also catch ``monkey`` or ``keyword``.
 - Its field declaration. The connector's config model marks the field as
   ``SecretStr``/``SecretBytes``, ``format="password"``, a ``password`` UI
   widget, or ``writeOnly=True``. That catches secrets with innocent names
@@ -62,12 +65,16 @@ SENSITIVE_KEY_FRAGMENTS = (
     "credential",
 )
 
+SENSITIVE_KEY_NAMES = frozenset({"key"})
+
 _SECRET_TYPES = (pydantic.SecretStr, pydantic.SecretBytes)
 _SEQUENCE_TYPES = (list, tuple, set, frozenset)
 
 
 def _is_sensitive_key(key: Any) -> bool:
     normalized = str(key).lower().replace("-", "_")
+    if normalized in SENSITIVE_KEY_NAMES:
+        return True
     return any(fragment in normalized for fragment in SENSITIVE_KEY_FRAGMENTS)
 
 
