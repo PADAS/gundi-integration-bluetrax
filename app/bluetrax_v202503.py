@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 import httpx
 import pydantic
 
-BLUETRAX_API_URL = "https://public_api.bluetrax.co.ke/api"
+BLUETRAX_API_URL = "https://public-api.bluetrax.co.ke/api"
 
 
 class LoginResponse(pydantic.BaseModel):
