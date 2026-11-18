@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import importlib
 import logging
+import traceback
 from urllib.parse import urlparse
 import httpx
 from fastapi import Request
@@ -216,7 +217,9 @@ async def process_webhook(request: Request):
                     parsed_payload = payload_model.parse_obj(json_content)
             except Exception as e:
                 message = redact_text(f"Error parsing payload: {type(e).__name__}: {str(e)}. Please review configurations.")
-                logger.exception(message)
+                # logger.exception would append the raw traceback, which can
+                # repeat the credential the message just had masked.
+                logger.error(f"{message}\n{redact_text(traceback.format_exc())}")
                 await publish_event(
                     event=IntegrationWebhookFailed(
                         payload=WebhookExecutionFailed(
@@ -249,7 +252,7 @@ async def process_webhook(request: Request):
         # The handler's exception text can quote a URL or body with credentials
         # in it; mask them as the activity logger does for its own events.
         message = redact_text(f"Error processing webhook: {type(e).__name__}: {str(e)}")
-        logger.exception(message)
+        logger.error(f"{message}\n{redact_text(traceback.format_exc())}")
         await publish_event(
             event=IntegrationWebhookFailed(
                 payload=WebhookExecutionFailed(

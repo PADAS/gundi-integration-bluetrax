@@ -390,9 +390,19 @@ def _redact_query(query: str) -> str:
 # run could only find the "=" the run's start already found (the key is
 # greedy), and retrying from every position of a long run with no "=" (a JWT,
 # a hex blob) took quadratic time inside the async error handling.
+#   - a quoted key followed by ":" and its value, as JSON and a Python dict
+#     print it ({"password": "hunter2"}, {'key': 'abc'}), quotes optionally
+#     backslash-escaped as in a JSON string inside another. A sensitive key
+#     has its value masked, the quotes around the value kept; an innocent
+#     key is left as it is and its value scanned like the rest of the text.
+#     A pair whose value opens such an object (body={"password": ...}) is
+#     left for this rule, so the object is read key by key rather than cut
+#     at its first space.
 _URL_OR_PAIR = re.compile(
     r"""(?P<quote>['"])?(?P<url>https?://[^\s<>"]+)"""
-    r"""|(?<![A-Za-z0-9_.\-\[\]%])(?P<key>[A-Za-z0-9_.\-\[\]%]+)=(?P<value>(?:"[^"]*"|'[^']*'|[^\s])+)"""
+    r"""|(?P<qkey>(?P<esc>\\)?(?P<q>["'])(?P<qname>[^"'\s:\\]+)(?(esc)\\)(?P=q)\s*:\s*)"""
+    r"""(?P<qvalue>(?(esc)\\"(?:(?!\\").)*\\"|"(?:[^"\\]|\\.)*")|'(?:[^'\\]|\\.)*'|[^\s,}\]]+)?"""
+    r"""|(?<![A-Za-z0-9_.\-\[\]%])(?P<key>[A-Za-z0-9_.\-\[\]%]+)=(?!\{\s*\\?["'])(?P<value>(?:"[^"]*"|'[^']*'|[^\s])+)"""
 )
 
 
@@ -425,6 +435,17 @@ def _redact_text(text: str, depth: int) -> str:
             closing = quote if quote and url.endswith(quote) else ""
             url = url[:len(url) - len(closing)]
             return f"{quote}{redact_url(url)}{closing}"
+        qkey = match.group("qkey")
+        if qkey is not None:
+            qvalue = match.group("qvalue") or ""
+            if not qvalue or not _is_sensitive_key(match.group("qname")):
+                return qkey + _redact_text(qvalue, depth + 1) if qvalue and depth < _RESCAN_DEPTH else qkey + qvalue
+            # Keep the quotes around a quoted value so the text still reads as
+            # the dict or JSON it was.
+            opening = re.match(r"""\\?["']""", qvalue)
+            if opening:
+                return f"{qkey}{opening.group()}{REDACTED}{opening.group()}"
+            return f"{qkey}{REDACTED}"
         key, value = match.group("key"), match.group("value")
         if _is_sensitive_key(unquote(key)) or depth >= _RESCAN_DEPTH:
             return f"{key}={REDACTED}"

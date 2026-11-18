@@ -583,6 +583,20 @@ def test_redact_text_masks_the_whole_value_of_a_sensitive_key():
     assert redact_text("password=a&b c") == f"password={REDACTED} c"
 
 
+def test_redact_text_masks_quoted_secret_fields_in_json_and_dict_text():
+    assert redact_text('login rejected: {"password": "hunter2"}') == f'login rejected: {{"password": "{REDACTED}"}}'
+    # Bluetrax's login body names its API key "key".
+    assert redact_text("{'key': 'abc123', 'user_name': 'u'}") == f"{{'key': '{REDACTED}', 'user_name': 'u'}}"
+    assert redact_text('{"api_key": 12345, "n": 2}') == f'{{"api_key": {REDACTED}, "n": 2}}'
+    assert redact_text('{"password": "a\\"b c"}') == f'{{"password": "{REDACTED}"}}'
+    # JSON quoted inside another string, and an object given as a pair's value.
+    assert redact_text('body={\\"password\\": \\"p q\\"}') == f'body={{\\"password\\": \\"{REDACTED}\\"}}'
+    assert redact_text('data={"password": "x y"} page=2') == f'data={{"password": "{REDACTED}"}} page=2'
+    # Innocent fields stay, and their values are still scanned.
+    assert redact_text('{"monkey": "m", "keyword": "k"}') == '{"monkey": "m", "keyword": "k"}'
+    assert redact_text('{"url": "https://x.test/?token=t"}') == f'{{"url": "https://x.test/?token={REDACTED}"}}'
+
+
 def test_redact_text_scans_an_innocent_value_for_what_it_holds():
     assert redact_text('url="https://x.test/a?token=t&page=2" next') == f'url="https://x.test/a?token={REDACTED}&page=2" next'
     assert redact_text('data="see password=hunter2 here" page=2') == f'data="see password={REDACTED} here" page=2'

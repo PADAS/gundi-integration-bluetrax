@@ -86,3 +86,24 @@ async def test_webhook_failure_event_redacts_secrets_in_the_error_text(mocker, i
     event = published.call_args.kwargs["event"]
     assert "provider.example" in event.payload.error
     assert "url-secret" not in event.json()
+
+
+@pytest.mark.asyncio
+async def test_webhook_failure_log_redacts_the_traceback(mocker, integration_v2_with_webhook, caplog):
+    integration = integration_v2_with_webhook
+    mocker.patch.object(webhooks, "get_integration", AsyncMock(return_value=integration))
+    mocker.patch.object(webhooks, "publish_event", AsyncMock())
+
+    async def handler(**kwargs):
+        raise RuntimeError("GET https://provider.example/data?api_key=url-secret failed")
+
+    mocker.patch.object(webhooks, "get_webhook_handler", return_value=(handler, None, None))
+    request = mocker.Mock()
+    request.json = AsyncMock(return_value={})
+
+    with caplog.at_level("ERROR", logger=webhooks.logger.name):
+        await webhooks.process_webhook(request)
+
+    assert "Traceback" in caplog.text
+    assert "url-secret" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)

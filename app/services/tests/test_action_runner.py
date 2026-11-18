@@ -2766,3 +2766,36 @@ async def test_handler_failure_redacts_the_request_and_response_it_attaches(
     assert events[0].payload.request_data == details["request_data"]
     assert events[0].payload.request_url == details["request_url"]
     assert events[0].payload.server_response_body == details["server_response_body"]
+
+
+@pytest.mark.asyncio
+async def test_handler_failure_redacts_a_json_body_quoted_in_the_exception_text(
+        mocker, caplog, mock_gundi_client_v2, mock_config_manager, mock_publish_event, mock_action_handlers, integration_v2,
+):
+    # A connector that puts the rejected login body in its exception message
+    # (Bluetrax names its API key "key"): the event's error and traceback
+    # must not carry the credential.
+    from app.services.redaction import REDACTED
+    handler, _, _ = mock_action_handlers["pull_observations"]
+    handler.side_effect = RuntimeError('login rejected: {"user_name": "u", "key": "abc123", "password": "hunter2"}')
+    caplog.set_level("ERROR", logger="app.services.action_runner")
+    mocker.patch("app.services.action_runner.action_handlers", mock_action_handlers)
+    mocker.patch("app.services.action_runner._portal", mock_gundi_client_v2)
+    mocker.patch("app.services.action_runner.config_manager", mock_config_manager)
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch("app.services.action_runner.publish_event", mock_publish_event)
+
+    http_response = api_client.post(
+        "/v1/actions/execute/",
+        json={"integration_id": str(integration_v2.id), "action_id": "pull_observations"},
+    )
+
+    assert http_response.status_code == 500
+    events = _published_events_of_type(mock_publish_event, IntegrationActionFailed)
+    assert len(events) == 1
+    for secret in ("abc123", "hunter2"):
+        assert secret not in http_response.text
+        assert secret not in caplog.text
+        assert secret not in events[0].json()
+    assert f'"key": "{REDACTED}"' in events[0].payload.error
+    assert f'"key": "{REDACTED}"' in events[0].payload.error_traceback
