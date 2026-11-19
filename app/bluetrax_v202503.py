@@ -7,6 +7,33 @@ import pydantic
 
 BLUETRAX_API_URL = "https://public-api.bluetrax.co.ke/api"
 
+# Statuses Bluetrax uses when it rejects the login itself. A wrong username
+# or API key is answered with 400 and {"Error": ["Invalid Credentials, ..."]}.
+REJECTED_LOGIN_STATUSES = (400, 401, 403)
+
+
+class BluetraxLoginRejected(httpx.HTTPStatusError):
+    """Bluetrax answered the login and refused the username or API key.
+
+    Still an httpx.HTTPStatusError, so callers that only look at the status
+    keep working. `reason` is what Bluetrax said, or "" if it said nothing
+    readable.
+    """
+
+    def __init__(self, message: str, *, request: httpx.Request, response: httpx.Response, reason: str = ""):
+        super().__init__(message, request=request, response=response)
+        self.reason = reason
+
+
+def _login_rejection_reason(response: httpx.Response) -> str:
+    try:
+        errors = response.json().get("Error")
+    except (ValueError, AttributeError):
+        return ""
+    if isinstance(errors, list):
+        return "; ".join(str(error) for error in errors)
+    return str(errors) if errors else ""
+
 
 class LoginResponse(pydantic.BaseModel):
     userName: str
@@ -83,6 +110,13 @@ async def authenticate(*, username: str, apikey: str) -> LoginResponse:
             }, 
             headers=headers,
         )
+        if response.status_code in REJECTED_LOGIN_STATUSES:
+            raise BluetraxLoginRejected(
+                f"Bluetrax rejected the login with status {response.status_code}",
+                request=response.request,
+                response=response,
+                reason=_login_rejection_reason(response),
+            )
         response.raise_for_status()
         return LoginResponse.parse_obj(response.json())
 

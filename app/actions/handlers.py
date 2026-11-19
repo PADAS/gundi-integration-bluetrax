@@ -1,3 +1,4 @@
+import hashlib
 import httpx
 import logging
 from datetime import datetime, timezone, timedelta
@@ -6,7 +7,7 @@ from app.services.activity_logger import activity_logger, log_action_activity
 from app.services.action_scheduler import crontab_schedule
 from app.services.gundi import send_observations_to_gundi
 from app.services.state import IntegrationStateManager
-from app.services.errors import ConfigurationNotFound, ConfigurationValidationError
+from app.services.errors import ConfigurationNotFound, ConfigurationValidationError, IntegrationAuthError
 from app.services.utils import find_config_for_action
 from gundi_core.schemas.v2 import Integration
 from pydantic import BaseModel, parse_obj_as
@@ -17,14 +18,26 @@ from gundi_core.events import (
     IntegrationActionCustomLog)
 
 from app.bluetrax_v202503 import authenticate, get_fleet_current_locations, \
-    get_vehicle_history, CurrentLocation, HistoryItem, LoginResponse
+    get_vehicle_history, CurrentLocation, HistoryItem, LoginResponse, \
+    BluetraxLoginRejected, REJECTED_LOGIN_STATUSES
 
 
 logger = logging.getLogger(__name__)
 
-# Statuses Bluetrax uses when it rejects the login itself.
-REJECTED_LOGIN_STATUSES = (400, 401, 403)
+# How long scheduled pulls stay quiet after Bluetrax rejects the saved
+# credentials. The pull runs every 5 minutes and rejected credentials do not
+# fix themselves, so without this the activity log gets an ERROR per run.
+# One login attempt, and one ERROR, per window; saving different credentials
+# ends the pause at once (see credentials_fingerprint).
+LOGIN_REJECTED_PAUSE_SECONDS = 60 * 60
 state_manager = IntegrationStateManager()
+
+
+def credentials_fingerprint(auth_config: AuthenticateConfig) -> str:
+    """Identifies a username and API key pair without storing either, so a
+    pause for rejected credentials applies only to the pair that was rejected."""
+    material = f"{auth_config.username}\0{auth_config.apikey.get_secret_value()}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def auth_cache_ttl_seconds(auth: LoginResponse) -> int:
@@ -81,9 +94,15 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         integration_id=integration.id,
         action_id='pull_observations_quiet'
     ):
-        logger.info(f"Pull observations action is paused: {paused}")
-        return paused
-    
+        rejected_credentials = paused.pop('credentials', None)
+        if rejected_credentials and rejected_credentials != credentials_fingerprint(get_auth_config(integration)):
+            # The pause was for credentials that have since been replaced.
+            logger.info("Credentials changed since the login was rejected, resuming pull observations.")
+            await state_manager.delete_state(integration_id=integration.id, action_id='pull_observations_quiet')
+        else:
+            logger.info(f"Pull observations action is paused: {paused}")
+            return paused
+
     auth = None
     if saved_loginresponse := await state_manager.get_state(
         integration_id=integration.id,
@@ -119,6 +138,30 @@ async def action_pull_observations(integration:Integration, action_config: PullE
         #     accumulator.extend([transform_history_item(item) for item in historyLocations.data])
         # if accumulator:
         #     await send_observations_to_gundi(accumulator, integration_id=integration.id)
+
+    except BluetraxLoginRejected as e:
+        # Bluetrax refused the saved username or API key. Report it once as
+        # an authentication failure, then stay quiet until the pause expires
+        # or the credentials are changed.
+        reason = e.reason[:200] or "the username or API key is not valid"
+        logger.warning(
+            f"Bluetrax rejected the login for integration {integration.id} "
+            f"(HTTP {e.response.status_code}: {reason}). "
+            f"Pausing pulls for {LOGIN_REJECTED_PAUSE_SECONDS} s."
+        )
+        await state_manager.set_state(
+            integration_id=integration.id, action_id='pull_observations_quiet',
+            state={
+                'paused': True,
+                'reason': 'Bluetrax rejected the saved credentials.',
+                'credentials': credentials_fingerprint(auth_config),
+            },
+            ttl_seconds=LOGIN_REJECTED_PAUSE_SECONDS,
+        )
+        raise IntegrationAuthError(
+            f"Bluetrax rejected the login: {reason}. Check the username and API key.",
+            status_code=e.response.status_code,
+        ) from e
 
     except httpx.HTTPStatusError as e:
         if e.response.status_code == 403:
