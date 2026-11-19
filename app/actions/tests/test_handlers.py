@@ -8,7 +8,9 @@ from gundi_core.schemas.v2 import Integration
 
 from app.actions import handlers
 from app.actions.configurations import AuthenticateConfig, PullEventsConfig
-from app.bluetrax_v202503 import FleetCurrentLocations, LoginResponse
+from app.bluetrax_v202503 import BluetraxLoginRejected, FleetCurrentLocations, LoginResponse
+from app.services.errors import IntegrationAuthError, format_error_message
+from app.services.retry_policies import is_retryable_failure
 from app.services.state import IntegrationStateManager
 
 
@@ -189,3 +191,109 @@ async def test_pull_observations_pauses_for_an_hour_on_403(
     assert len(quiet_writes) == 1
     assert json.loads(quiet_writes[0].args[1])["paused"] is True
     assert quiet_writes[0].kwargs["ex"] == 60 * 60
+
+
+def _login_rejected(status_code=400, reason="Invalid Credentials, please try again"):
+    request = httpx.Request("POST", "https://public-api.bluetrax.co.ke/api/Login/Login")
+    return BluetraxLoginRejected(
+        f"Bluetrax rejected the login with status {status_code}",
+        request=request,
+        response=httpx.Response(status_code, request=request, json={"Error": [reason]}),
+        reason=reason,
+    )
+
+
+def _quiet_writes(redis_client):
+    return [
+        call
+        for call in redis_client.set.call_args_list
+        if call.args[0].endswith(".pull_observations_quiet.no-source")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_reports_a_rejected_login_as_an_auth_error_and_pauses(
+    mocker, state_manager_on_mock_redis, bluetrax_integration, mock_publish_event
+):
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    mocker.patch.object(
+        handlers, "authenticate", mocker.AsyncMock(side_effect=_login_rejected())
+    )
+
+    with pytest.raises(IntegrationAuthError) as raised:
+        await handlers.action_pull_observations(
+            integration=bluetrax_integration, action_config=PullEventsConfig()
+        )
+
+    assert format_error_message(raised.value) == (
+        "Authentication failed — Bluetrax rejected the login: Invalid Credentials, "
+        "please try again. Check the username and API key. (HTTP 400)"
+    )
+    assert is_retryable_failure(raised.value) is False
+    quiet_writes = _quiet_writes(state_manager_on_mock_redis)
+    assert len(quiet_writes) == 1
+    assert quiet_writes[0].kwargs["ex"] == handlers.LOGIN_REJECTED_PAUSE_SECONDS
+    stored = quiet_writes[0].args[1]
+    assert json.loads(stored)["paused"] is True
+    # Neither credential is written to the state store.
+    assert "bluetrax-api-key" not in stored
+    assert "bluetrax-user" not in stored
+
+
+def _paused_for(mocker, redis_client, auth_config):
+    state = {
+        "paused": True,
+        "reason": "Bluetrax rejected the saved credentials.",
+        "credentials": handlers.credentials_fingerprint(auth_config),
+    }
+
+    async def get(key):
+        return json.dumps(state) if key.endswith(".pull_observations_quiet.no-source") else None
+
+    redis_client.get = mocker.AsyncMock(side_effect=get)
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_stays_quiet_while_the_rejected_credentials_are_unchanged(
+    mocker, state_manager_on_mock_redis, bluetrax_integration, auth_config, mock_publish_event
+):
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    _paused_for(mocker, state_manager_on_mock_redis, auth_config)
+    authenticate = mocker.patch.object(handlers, "authenticate", mocker.AsyncMock())
+
+    result = await handlers.action_pull_observations(
+        integration=bluetrax_integration, action_config=PullEventsConfig()
+    )
+
+    assert result == {"paused": True, "reason": "Bluetrax rejected the saved credentials."}
+    authenticate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pull_observations_resumes_as_soon_as_the_credentials_change(
+    mocker, state_manager_on_mock_redis, bluetrax_integration, login_response, mock_publish_event
+):
+    mocker.patch("app.services.activity_logger.publish_event", mock_publish_event)
+    _paused_for(
+        mocker, state_manager_on_mock_redis,
+        AuthenticateConfig(username="bluetrax-user", apikey="the-old-rejected-key"),
+    )
+    authenticate = mocker.patch.object(
+        handlers, "authenticate", mocker.AsyncMock(return_value=login_response)
+    )
+    mocker.patch.object(
+        handlers,
+        "get_fleet_current_locations",
+        mocker.AsyncMock(return_value=FleetCurrentLocations(response="success", data=[])),
+    )
+    mocker.patch.object(handlers, "send_observations_to_gundi", mocker.AsyncMock(return_value=[]))
+
+    result = await handlers.action_pull_observations(
+        integration=bluetrax_integration, action_config=PullEventsConfig()
+    )
+
+    assert result == {"finished": True}
+    authenticate.assert_awaited_once()
+    state_manager_on_mock_redis.delete.assert_called_once_with(
+        f"integration_state.{bluetrax_integration.id}.pull_observations_quiet.no-source"
+    )
